@@ -335,6 +335,67 @@ CREATE TABLE IF NOT EXISTS sample_events (
     occurred_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sample_events_sample ON sample_events(sample_id, id);
+
+CREATE TABLE IF NOT EXISTS handover_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_code TEXT NOT NULL UNIQUE,
+    station_code TEXT NOT NULL,
+    station_seq INTEGER NOT NULL CHECK(station_seq >= 1),
+    prev_digest TEXT NOT NULL DEFAULT '',
+    participants_json TEXT NOT NULL,
+    events_json TEXT NOT NULL,
+    packaged_at TEXT NOT NULL,
+    package_digest TEXT NOT NULL UNIQUE,
+    received_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handover_packages_station ON handover_packages(station_code, station_seq);
+
+CREATE TABLE IF NOT EXISTS handover_segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_code TEXT NOT NULL,
+    package_id INTEGER NOT NULL REFERENCES handover_packages(id) ON DELETE CASCADE,
+    package_digest TEXT NOT NULL,
+    station_seq INTEGER NOT NULL,
+    position INTEGER,
+    adoption TEXT NOT NULL CHECK(adoption IN ('adopted','fork_pending','fork_loser','orphan')),
+    rationale TEXT NOT NULL,
+    recomputed_at TEXT NOT NULL,
+    UNIQUE(station_code, package_id)
+);
+CREATE INDEX IF NOT EXISTS idx_handover_segments_station ON handover_segments(station_code, position);
+
+CREATE TABLE IF NOT EXISTS handover_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conflict_code TEXT NOT NULL UNIQUE,
+    station_code TEXT NOT NULL,
+    conflict_type TEXT NOT NULL CHECK(conflict_type IN ('fork','sequence_gap','duplicate_event','cross_batch_reference')),
+    sample_ref TEXT,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','resolved')),
+    resolution_json TEXT,
+    resolved_by INTEGER REFERENCES users(id),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handover_conflicts_state ON handover_conflicts(state, conflict_type);
+
+CREATE TABLE IF NOT EXISTS handover_sample_chains (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_code TEXT NOT NULL,
+    sample_ref TEXT NOT NULL,
+    batch_code TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','conflicted','chain_ready','received')),
+    events_json TEXT NOT NULL DEFAULT '[]',
+    excluded_json TEXT NOT NULL DEFAULT '[]',
+    issues_json TEXT NOT NULL DEFAULT '[]',
+    actions_json TEXT NOT NULL DEFAULT '[]',
+    received_sample_id INTEGER REFERENCES samples(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(station_code, sample_ref)
+);
 """
 
 PERMISSIONS = [
@@ -353,6 +414,8 @@ PERMISSIONS = [
     ("approvals.decide", "审批高风险操作", "approvals", "decide"),
     ("locations.read_sensitive", "查看精确保管位置", "locations", "read_sensitive"),
     ("anomalies.manage", "管理异常", "anomalies", "manage"),
+    ("handover.upload", "上传离线交接包", "handover", "upload"),
+    ("handover.adjudicate", "裁决交接链冲突", "handover", "adjudicate"),
 ]
 
 
@@ -432,9 +495,10 @@ def init_db() -> None:
             "sample_manager": [
                 "samples.read", "samples.write", "samples.consume", "samples.destroy",
                 "loans.manage", "inventory.manage", "anomalies.manage",
+                "handover.upload", "handover.adjudicate",
             ],
             "researcher": ["samples.read", "samples.consume"],
-            "approver": ["samples.read", "approvals.decide"],
+            "approver": ["samples.read", "approvals.decide", "handover.adjudicate"],
             "auditor": ["samples.read", "audit.read"],
         }
         for role_code, permission_codes in role_permissions.items():
